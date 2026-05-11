@@ -2,6 +2,8 @@ import asyncio
 import json
 import os
 import time
+import pandas as pd
+from pathlib import Path
 import redis.asyncio as redis
 from datetime import datetime, timezone
 from dnse_ws.client import TradingClient
@@ -14,8 +16,51 @@ SYMBOLS = ["VN301!", "VNINDEX", "VN30"]
 API_KEY = os.getenv("DNSE_API_KEY", "eyJvcmciOiJkbnNlIiwiaWQiOiJiNDcxYTBhNjE4MTI0ZWNjYTI0YjI2YzcyMGExNzdkZiIsImgiOiJtdXJtdXIxMjgifQ==")
 API_SECRET = os.getenv("DNSE_API_SECRET", "510ksymQU949Se_NphYe3_LXT1O8zclFx1lam3MPRuIMOQhdOvokSQPE7YmhHEUTS4pCq9ZqaWnpbaui34AJVw")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+DATA_DIR = Path("data")
 
 r = redis.from_url(REDIS_URL, decode_responses=True)
+
+class ParquetStore:
+    def __init__(self, base_dir: Path):
+        self.base_dir = base_dir
+        self.buffers = {s: [] for s in SYMBOLS}
+        self.base_dir.mkdir(exist_ok=True)
+        (self.base_dir / "ticks").mkdir(exist_ok=True)
+
+    def add_tick(self, symbol, price):
+        self.buffers[symbol].append({
+            "timestamp": datetime.now(timezone.utc),
+            "price": float(price)
+        })
+
+    async def flush_loop(self):
+        """Periodically save buffers to Parquet"""
+        while True:
+            await asyncio.sleep(60)  # Flush every 60 seconds
+            for symbol, ticks in self.buffers.items():
+                if not ticks:
+                    continue
+                
+                # Copy and clear buffer
+                to_save = ticks[:]
+                self.buffers[symbol] = []
+                
+                try:
+                    df = pd.DataFrame(to_save)
+                    date_str = datetime.now().strftime("%Y-%m-%d")
+                    symbol_dir = self.base_dir / "ticks" / symbol.replace("!", "F")
+                    symbol_dir.mkdir(parents=True, exist_ok=True)
+                    file_path = symbol_dir / f"{date_str}.parquet"
+                    
+                    if file_path.exists():
+                        # Append to existing parquet
+                        existing_df = pd.read_parquet(file_path)
+                        df = pd.concat([existing_df, df]).drop_duplicates().sort_values("timestamp")
+                    
+                    df.to_parquet(file_path, compression="snappy")
+                    print(f"[Data Store] Saved {len(to_save)} ticks for {symbol} to {file_path}")
+                except Exception as e:
+                    print(f"[Data Store] Error saving Parquet for {symbol}: {e}")
 
 class DataService:
     def __init__(self):
@@ -24,74 +69,40 @@ class DataService:
             api_secret=API_SECRET,
             auto_reconnect=True
         )
-        self.http = urllib3.PoolManager()
-
-    async def fetch_history_rest(self, symbol):
-        """Fetch history via REST API (Initial Sync)"""
-        print(f"[Data Service] Fetching history for {symbol} via REST...")
-        now = int(time.time())
-        # Mapping symbol to DNSE API type/symbol if needed (Assuming direct for now)
-        api_symbol = symbol.replace("!", "") # Handle VN301! -> VN301
-        
-        # Build REST request
-        path = "/price/ohlc"
-        query = {
-            "symbol": api_symbol,
-            "resolution": "1",
-            "from": now - 86400 * 2,
-            "to": now,
-            "type": "INDEX" if "INDEX" in symbol or "VN30" == symbol else "DERIVATIVE" if "1!" in symbol else "STOCK"
-        }
-        
-        # Simplified request logic for history
-        # (In a real app, we'd use the full DNSEClient, but we'll stick to a simple fetch for the script)
-        # For now, let's just log that we are ready to receive WS data
-        print(f"[Data Service] History sync for {symbol} would happen here.")
+        self.store = ParquetStore(DATA_DIR)
 
     async def on_trade(self, trade: Trade):
         """Handle live trades (Ticks)"""
-        # print(f"[Data Service] Tick: {trade.symbol} @ {trade.price}")
-        
         data = {
             "symbol": trade.symbol,
             "price": float(trade.price),
             "timestamp": int(time.time() * 1000)
         }
         
-        # 1. Update latest tick in Redis
+        # 1. Update Redis for live chart
         await r.set(f"tick:{trade.symbol}", json.dumps(data))
-        
-        # 2. Publish to market_data channel
         await r.publish("market_data", json.dumps(data))
-
-    async def on_ohlc(self, ohlc: Ohlc):
-        """Handle live OHLC bars"""
-        # print(f"[Data Service] Bar: {ohlc.symbol} {ohlc.close}")
-        # Note: WebSocket OHLC might need transformation to match dashboard expectations
-        pass
+        
+        # 2. Store in local Parquet buffer
+        self.store.add_tick(trade.symbol, trade.price)
 
     async def run(self):
-        print("[Data Service] Starting Standalone Data Service...")
+        print("[Data Service] Starting Standalone Data Service with Parquet storage...")
         
         # 1. Register handlers
         self.ws_client.on("trade", self.on_trade)
-        self.ws_client.on("ohlc", self.on_ohlc)
         
-        # 2. Connect
+        # 2. Start flush loop
+        asyncio.create_task(self.store.flush_loop())
+        
+        # 3. Connect
         try:
             await self.ws_client.connect()
-            
-            # 3. Subscribe
-            print(f"[Data Service] Subscribing to trades for: {SYMBOLS}")
+            print(f"[Data Service] Subscribing to: {SYMBOLS}")
             await self.ws_client.subscribe_trades(SYMBOLS)
             
-            # 4. Keep running
             while True:
                 await asyncio.sleep(10)
-                if not self.ws_client.is_healthy:
-                    print("[Data Service] Client unhealthy, reconnecting...")
-                    # Reconnection is handled by the client automatically if enabled
-                    
         except Exception as e:
             print(f"[Data Service] Error: {e}")
         finally:

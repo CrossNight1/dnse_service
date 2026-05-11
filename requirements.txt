@@ -4,3 +4,5 @@ msgpack
 urllib3
 redis
 asyncio
+pandas
+pyarrow
