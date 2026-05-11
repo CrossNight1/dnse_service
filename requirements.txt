@@ -1,0 +1,6 @@
+python-dotenv
+websockets
+msgpack
+urllib3
+redis
+asyncio

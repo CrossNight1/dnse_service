@@ -1,0 +1,15 @@
+[DNSE Adapter] Starting...
+[DNSE Adapter] Fetching fresh history for VN301! from DNSE API...
+[DNSE] History fetch failed for VN301!: fetch failed
+[DNSE Adapter] API fetch failed for VN301!, using existin[DNSE] History fetch failed for VN301!: This operation was aborted
+[DNSE] History fetch failed for VNINDEX: This operation was aborted
+[DNSE] History fetch failed for VN30: This operation was aborted
+data from Redis.
+[DNSE Adapter] Fetching fresh history for VN30 from DNSE API...
+[DNSE] History fetch failed for VN30: fetch failed
+[DNSE Adapter] API fetch failed for VN30, using existing data from Redis.
+[DNSE] History fetch failed for VN301!: fetch failed
+[DNSE] History fetch failed for VNINDEX: fetch failed
+[DNSE] History fetch failed for VN30: fetch failed
+ration was aborted
+[DNSE] History fetch failed for VN30: This operation was aborted
