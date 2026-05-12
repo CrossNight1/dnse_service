@@ -141,15 +141,22 @@ class DataService:
             await self.ws_client.disconnect()
             print("[Data Service] Disconnected. Goodbye.")
 
-if __name__ == "__main__":
+async def main():
     service = DataService()
     
     # Setup signal handling for Ctrl+C
-    loop = asyncio.get_event_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, service.stop)
-        
     try:
-        loop.run_until_complete(service.run())
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, service.stop)
+    except NotImplementedError:
+        # Signal handlers are not implemented on Windows (not relevant here but good practice)
+        pass
+        
+    await service.run()
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
     except KeyboardInterrupt:
         pass
