@@ -14,7 +14,11 @@ import urllib3
 
 # Configuration
 SYMBOLS = ["VN30F1M", "VNINDEX", "VN30"]
-SYMBOL_MAP = {"VN30F1M": "VN301!"} # Map DNSE ticker to Dashboard ticker
+TYPE_MAP = {
+    "VN30F1M": "DERIVATIVE",
+    "VNINDEX": "INDEX",
+    "VN30": "INDEX"
+}
 API_KEY = os.getenv("DNSE_API_KEY", "eyJvcmciOiJkbnNlIiwiaWQiOiJiNDcxYTBhNjE4MTI0ZWNjYTI0YjI2YzcyMGExNzdkZiIsImgiOiJtdXJtdXIxMjgifQ==")
 API_SECRET = os.getenv("DNSE_API_SECRET", "510ksymQU949Se_NphYe3_LXT1O8zclFx1lam3MPRuIMOQhdOvokSQPE7YmhHEUTS4pCq9ZqaWnpbaui34AJVw")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
@@ -82,14 +86,17 @@ class DataService:
         self._stop_event = asyncio.Event()
 
     async def on_trade(self, trade: Trade):
-        """Handle live trades (Ticks) - Redis Only"""
+        """Handle live trades - Push to Redis for live chart"""
         data = {
             "symbol": trade.symbol,
             "price": float(trade.price),
-            "timestamp": int(time.time() * 1000)
+            "timestamp": trade.time,
+            "side": trade.side,
+            "volume": int(trade.volume),
+            "type": TYPE_MAP.get(trade.symbol, "INDEX")
         }
-        await r.set(f"tick:{trade.symbol}", json.dumps(data))
         await r.publish("market_data", json.dumps(data))
+        await r.set(f"tick:{trade.symbol}", json.dumps(data))
 
     async def on_quote(self, quote: Quote):
         """Handle live quotes (BBO) - Redis Only"""
@@ -121,7 +128,8 @@ class DataService:
                 "high": float(ohlc.high),
                 "low": float(ohlc.low),
                 "close": float(ohlc.close),
-                "volume": int(ohlc.volume)
+                "volume": int(ohlc.volume),
+                "type": TYPE_MAP.get(ohlc.symbol, "INDEX")
             }
             candles.append(new_candle)
             
@@ -132,7 +140,6 @@ class DataService:
             await r.set(key, json.dumps(candles))
             
             # Also update higher timeframes for simple visualization (Optional)
-            # For now, we'll just keep them updated so they aren't totally stale.
             for tf in ["5m", "15m", "1h", "4h", "1D"]:
                 await r.set(f"candles:{ohlc.symbol}:{tf}", json.dumps(candles))
                 
@@ -155,9 +162,8 @@ class DataService:
         
         for symbol in SYMBOLS:
             try:
-                display_symbol = SYMBOL_MAP.get(symbol, symbol)
                 url = f"https://openapi.dnse.com.vn/v1/market/ohlc?symbol={symbol}&resolution=1&from={today_start}&to={now}"
-                print(f"[Data Service] Fetching history for {symbol} (Dashboard: {display_symbol})...")
+                print(f"[Data Service] Fetching history for {symbol}...")
                 
                 # Run sync request in a thread to avoid blocking the event loop
                 resp = await asyncio.to_thread(
@@ -206,11 +212,11 @@ class DataService:
                             
                             # 2. Update Redis with the list of candles (Dashboard expectation)
                             # Prefix MUST be 'candles:' as per vps_dashboard Go server
-                            await r.set(f"candles:{display_symbol}:1m", json.dumps(all_bars))
+                            await r.set(f"candles:{symbol}:1m", json.dumps(all_bars))
                             
                             # Also update higher timeframes with the same list for now so they aren't empty/stale
                             for tf in ["5m", "15m", "1h", "4h", "1D"]:
-                                await r.set(f"candles:{display_symbol}:{tf}", json.dumps(all_bars))
+                                await r.set(f"candles:{symbol}:{tf}", json.dumps(all_bars))
                                 
                         else:
                             print(f"[Data Service] No historical data found for {symbol} today.")
