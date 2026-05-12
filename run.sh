@@ -31,8 +31,8 @@ else
     fi
     
     if [ "$1" == "--background" ]; then
-        nohup python3 main.py > data_service.log 2>&1 &
+        nohup python3 -u main.py > data_service.log 2>&1 &
     else
-        python3 main.py
+        python3 -u main.py
     fi
 fi

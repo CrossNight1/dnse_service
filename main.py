@@ -152,78 +152,88 @@ class DataService:
 
     async def bootstrap(self):
         """Fetch historical candles from REST API to fill gaps and update Redis"""
-        print("[Data Service] Bootstrapping historical data...")
+        print(f"[Data Service] Bootstrapping historical data from today start...")
         
         # Calculate timestamps for today (from midnight to now)
         now = int(time.time())
         today_start = int(datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
         
         http = urllib3.PoolManager(timeout=urllib3.Timeout(connect=5.0, read=10.0))
-        
-        for symbol in SYMBOLS:
+
+        async def sync_symbol(symbol):
             try:
                 url = f"https://openapi.dnse.com.vn/v1/market/ohlc?symbol={symbol}&resolution=1&from={today_start}&to={now}"
                 print(f"[Data Service] Fetching history for {symbol}...")
                 
-                # Run sync request in a thread to avoid blocking the event loop
                 resp = await asyncio.to_thread(
-                    http.request, "GET", url, 
-                    headers={"Authorization": f"Bearer {API_KEY}"}
+                    http.request, 
+                    "GET", 
+                    url, 
+                    headers={"Authorization": f"Bearer {API_KEY}"},
+                    timeout=5.0
                 )
                 
+                all_bars = []
                 if resp.status == 200:
                     data = json.loads(resp.data.decode('utf-8'))
                     if data.get("s") == "ok" and "t" in data:
-                        timestamps = data["t"]
-                        opens = data["o"]
-                        highs = data["h"]
-                        lows = data["l"]
-                        closes = data["c"]
-                        volumes = data["v"]
-                        
-                        count = len(timestamps)
-                        if count > 0:
-                            print(f"[Data Service] Fetched {count} historical bars for {symbol}")                            # 1. Update Parquet Store
-                            all_bars = []
-                            for i in range(count):
-                                ohlc = Ohlc(
-                                    symbol=symbol,
-                                    resolution=1,
-                                    open=opens[i],
-                                    high=highs[i],
-                                    low=lows[i],
-                                    close=closes[i],
-                                    volume=volumes[i],
-                                    time=timestamps[i],
-                                    lastUpdated=timestamps[i],
-                                    type="ohlc"
-                                )
-                                self.store.add_ohlcv(ohlc)
-                                
-                                # Prepare for Redis
-                                all_bars.append({
-                                    "time": timestamps[i],
-                                    "open": float(opens[i]),
-                                    "high": float(highs[i]),
-                                    "low": float(lows[i]),
-                                    "close": float(closes[i]),
-                                    "volume": int(volumes[i])
-                                })
+                        for i in range(len(data["t"])):
+                            bar = {
+                                "time": int(data["t"][i]),
+                                "open": float(data["o"][i]),
+                                "high": float(data["h"][i]),
+                                "low": float(data["l"][i]),
+                                "close": float(data["c"][i]),
+                                "volume": int(data["v"][i]),
+                                "type": TYPE_MAP.get(symbol, "INDEX")
+                            }
+                            all_bars.append(bar)
                             
-                            # 2. Update Redis with the list of candles (Dashboard expectation)
-                            # Prefix MUST be 'candles:' as per vps_dashboard Go server
-                            await r.set(f"candles:{symbol}:1m", json.dumps(all_bars))
-                            
-                            # Also update higher timeframes with the same list for now so they aren't empty/stale
-                            for tf in ["5m", "15m", "1h", "4h", "1D"]:
-                                await r.set(f"candles:{symbol}:{tf}", json.dumps(all_bars))
-                                
-                        else:
-                            print(f"[Data Service] No historical data found for {symbol} today.")
+                            # Store in Parquet buffer
+                            ohlc_obj = Ohlc(
+                                symbol=symbol, resolution="1",
+                                open=bar["open"], high=bar["high"],
+                                low=bar["low"], close=bar["close"],
+                                volume=bar["volume"], time=bar["time"]
+                            )
+                            self.store.add_ohlcv(ohlc_obj)
+                
+                if all_bars:
+                    print(f"[Data Service] Bootstrapped {len(all_bars)} bars for {symbol}")
+                    await r.set(f"candles:{symbol}:1m", json.dumps(all_bars))
+                    for tf in ["5m", "15m", "1h", "4h", "1D"]:
+                        await r.set(f"candles:{symbol}:{tf}", json.dumps(all_bars))
+                    return
+
+                # FALLBACK: Try local Parquet
+                print(f"[Data Service] API failed or no data for {symbol}, trying local fallback...")
+                date_str = datetime.now().strftime("%Y-%m-%d")
+                symbol_path = symbol.replace("!", "F")
+                file_path = DATA_DIR / "ohlcv" / symbol_path / f"{date_str}.parquet"
+                
+                if file_path.exists():
+                    df = pd.read_parquet(file_path)
+                    if not df.empty:
+                        fallback_bars = []
+                        for _, row in df.iterrows():
+                            fallback_bars.append({
+                                "time": int(row['timestamp'].timestamp()),
+                                "open": float(row['open']), "high": float(row['high']),
+                                "low": float(row['low']), "close": float(row['close']),
+                                "volume": int(row['volume']), "type": TYPE_MAP.get(symbol, "INDEX")
+                            })
+                        print(f"[Data Service] Fallback: Loaded {len(fallback_bars)} bars from Parquet for {symbol}")
+                        await r.set(f"candles:{symbol}:1m", json.dumps(fallback_bars))
+                        for tf in ["5m", "15m", "1h", "4h", "1D"]:
+                            await r.set(f"candles:{symbol}:{tf}", json.dumps(fallback_bars))
                 else:
-                    print(f"[Data Service] Failed to bootstrap {symbol}: HTTP {resp.status}")
+                    print(f"[Data Service] No local fallback data for {symbol}")
+
             except Exception as e:
-                print(f"[Data Service] Bootstrap error for {symbol}: {e}")
+                print(f"[Data Service] Error bootstrapping {symbol}: {str(e)}")
+
+        # Run all syncs in parallel
+        await asyncio.gather(*(sync_symbol(s) for s in SYMBOLS))
         
         self.store.flush()
         print("[Data Service] Bootstrap complete.")
@@ -231,8 +241,9 @@ class DataService:
     async def run(self):
         print("[Data Service] Starting Standalone Data Service (Live Ticks + OHLCV Storage)...")
         
-        # 1. Bootstrap historical data
-        await self.bootstrap()
+        # 1. Start bootstrap in the background (Non-blocking)
+        # This prevents the service from hanging if the REST API is slow
+        asyncio.create_task(self.bootstrap())
         
         # 2. Register handlers
         self.ws_client.on("trade", self.on_trade)
