@@ -23,53 +23,47 @@ r = redis.from_url(REDIS_URL, decode_responses=True)
 class ParquetStore:
     def __init__(self, base_dir: Path):
         self.base_dir = base_dir
-        self.tick_buffers = {s: [] for s in SYMBOLS}
-        self.quote_buffers = {s: [] for s in SYMBOLS}
+        self.ohlcv_buffers = {s: [] for s in SYMBOLS}
         self.base_dir.mkdir(exist_ok=True)
-        (self.base_dir / "ticks").mkdir(exist_ok=True)
-        (self.base_dir / "quotes").mkdir(exist_ok=True)
+        (self.base_dir / "ohlcv").mkdir(exist_ok=True)
 
-    def add_tick(self, symbol, price):
-        self.tick_buffers[symbol].append({
-            "timestamp": datetime.now(timezone.utc),
-            "price": float(price)
-        })
-
-    def add_quote(self, symbol, bid, ask):
-        self.quote_buffers[symbol].append({
-            "timestamp": datetime.now(timezone.utc),
-            "bid": float(bid),
-            "ask": float(ask)
+    def add_ohlcv(self, ohlc: Ohlc):
+        self.ohlcv_buffers[ohlc.symbol].append({
+            "timestamp": datetime.fromtimestamp(ohlc.time, tz=timezone.utc),
+            "open": float(ohlc.open),
+            "high": float(ohlc.high),
+            "low": float(ohlc.low),
+            "close": float(ohlc.close),
+            "volume": int(ohlc.volume)
         })
 
     async def flush_loop(self):
         """Periodically save buffers to Parquet"""
         while True:
             await asyncio.sleep(60)  # Flush every 60 seconds
-            for dtype, buffers in [("ticks", self.tick_buffers), ("quotes", self.quote_buffers)]:
-                for symbol, data in buffers.items():
-                    if not data:
-                        continue
+            for symbol, data in self.ohlcv_buffers.items():
+                if not data:
+                    continue
+                
+                # Copy and clear buffer
+                to_save = data[:]
+                self.ohlcv_buffers[symbol] = []
+                
+                try:
+                    df = pd.DataFrame(to_save)
+                    date_str = datetime.now().strftime("%Y-%m-%d")
+                    symbol_dir = self.base_dir / "ohlcv" / symbol.replace("!", "F")
+                    symbol_dir.mkdir(parents=True, exist_ok=True)
+                    file_path = symbol_dir / f"{date_str}.parquet"
                     
-                    # Copy and clear buffer
-                    to_save = data[:]
-                    buffers[symbol] = []
+                    if file_path.exists():
+                        existing_df = pd.read_parquet(file_path)
+                        df = pd.concat([existing_df, df]).drop_duplicates(subset=["timestamp"]).sort_values("timestamp")
                     
-                    try:
-                        df = pd.DataFrame(to_save)
-                        date_str = datetime.now().strftime("%Y-%m-%d")
-                        symbol_dir = self.base_dir / dtype / symbol.replace("!", "F")
-                        symbol_dir.mkdir(parents=True, exist_ok=True)
-                        file_path = symbol_dir / f"{date_str}.parquet"
-                        
-                        if file_path.exists():
-                            existing_df = pd.read_parquet(file_path)
-                            df = pd.concat([existing_df, df]).drop_duplicates().sort_values("timestamp")
-                        
-                        df.to_parquet(file_path, compression="snappy")
-                        print(f"[Data Store] Saved {len(to_save)} {dtype} for {symbol}")
-                    except Exception as e:
-                        print(f"[Data Store] Error saving {dtype} for {symbol}: {e}")
+                    df.to_parquet(file_path, compression="snappy")
+                    print(f"[Data Store] Saved {len(to_save)} bars for {symbol}")
+                except Exception as e:
+                    print(f"[Data Store] Error saving OHLCV for {symbol}: {e}")
 
 class DataService:
     def __init__(self):
@@ -81,7 +75,7 @@ class DataService:
         self.store = ParquetStore(DATA_DIR)
 
     async def on_trade(self, trade: Trade):
-        """Handle live trades (Ticks)"""
+        """Handle live trades (Ticks) - Redis Only"""
         data = {
             "symbol": trade.symbol,
             "price": float(trade.price),
@@ -89,35 +83,35 @@ class DataService:
         }
         await r.set(f"tick:{trade.symbol}", json.dumps(data))
         await r.publish("market_data", json.dumps(data))
-        self.store.add_tick(trade.symbol, trade.price)
 
     async def on_quote(self, quote: Quote):
-        """Handle live quotes (BBO)"""
+        """Handle live quotes (BBO) - Redis Only"""
         if not quote.bid or not quote.offer:
             return
-            
-        best_bid = quote.bid[0].price
-        best_ask = quote.offer[0].price
-        
         data = {
             "symbol": quote.symbol,
-            "bid": float(best_bid),
-            "ask": float(best_ask),
+            "bid": float(quote.bid[0].price),
+            "ask": float(quote.offer[0].price),
             "timestamp": int(time.time() * 1000)
         }
-        
-        # 1. Update Redis for live strategies
         await r.set(f"quote:{quote.symbol}", json.dumps(data))
+
+    async def on_ohlc(self, ohlc: Ohlc):
+        """Handle live OHLC bars - Store in Parquet & Update Redis"""
+        # 1. Store for backtesting
+        self.store.add_ohlcv(ohlc)
         
-        # 2. Store in local Parquet buffer
-        self.store.add_quote(quote.symbol, best_bid, best_ask)
+        # 2. Update Redis candles key (Optional: sync with dashboard expectation)
+        # For now, we mainly use this for recording.
+        pass
 
     async def run(self):
-        print("[Data Service] Starting Standalone Data Service with Tick & Quote storage...")
+        print("[Data Service] Starting Standalone Data Service (Live Ticks + OHLCV Storage)...")
         
         # 1. Register handlers
         self.ws_client.on("trade", self.on_trade)
         self.ws_client.on("quote", self.on_quote)
+        self.ws_client.on("ohlc", self.on_ohlc)
         
         # 2. Start flush loop
         asyncio.create_task(self.store.flush_loop())
@@ -125,9 +119,10 @@ class DataService:
         # 3. Connect
         try:
             await self.ws_client.connect()
-            print(f"[Data Service] Subscribing to trades & quotes for: {SYMBOLS}")
+            print(f"[Data Service] Subscribing to trades, quotes & 1m OHLC for: {SYMBOLS}")
             await self.ws_client.subscribe_trades(SYMBOLS)
             await self.ws_client.subscribe_quotes(SYMBOLS)
+            await self.ws_client.subscribe_ohlc(SYMBOLS, ["1"]) # 1 minute bars
             
             while True:
                 await asyncio.sleep(10)
