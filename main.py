@@ -118,16 +118,21 @@ class DataService:
         now = int(time.time())
         today_start = int(datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
         
-        http = urllib3.PoolManager()
+        http = urllib3.PoolManager(timeout=urllib3.Timeout(connect=5.0, read=10.0))
         
         for symbol in SYMBOLS:
             try:
                 url = f"https://openapi.dnse.com.vn/v1/market/ohlc?symbol={symbol}&resolution=1&from={today_start}&to={now}"
-                resp = http.request("GET", url, headers={"Authorization": f"Bearer {API_KEY}"})
+                print(f"[Data Service] Fetching history for {symbol}...")
+                
+                # Run sync request in a thread to avoid blocking the event loop
+                resp = await asyncio.to_thread(
+                    http.request, "GET", url, 
+                    headers={"Authorization": f"Bearer {API_KEY}"}
+                )
                 
                 if resp.status == 200:
                     data = json.loads(resp.data.decode('utf-8'))
-                    # Expected format: {"s": "ok", "t": [...], "o": [...], "h": [...], "l": [...], "c": [...], "v": [...]}
                     if data.get("s") == "ok" and "t" in data:
                         timestamps = data["t"]
                         opens = data["o"]
@@ -139,8 +144,6 @@ class DataService:
                         count = len(timestamps)
                         if count > 0:
                             print(f"[Data Service] Fetched {count} historical bars for {symbol}")
-                            
-                            # 1. Update Parquet Store
                             for i in range(count):
                                 ohlc = Ohlc(
                                     symbol=symbol,
@@ -156,7 +159,7 @@ class DataService:
                                 )
                                 self.store.add_ohlcv(ohlc)
                             
-                            # 2. Update Redis with the latest candle
+                            # Update Redis with the latest candle
                             last_idx = count - 1
                             redis_data = {
                                 "symbol": symbol,
@@ -168,13 +171,15 @@ class DataService:
                                 "timestamp": timestamps[last_idx] * 1000
                             }
                             await r.set(f"ohlc:{symbol}:1m", json.dumps(redis_data))
+                        else:
+                            print(f"[Data Service] No historical data found for {symbol} today.")
                 else:
                     print(f"[Data Service] Failed to bootstrap {symbol}: HTTP {resp.status}")
             except Exception as e:
                 print(f"[Data Service] Bootstrap error for {symbol}: {e}")
         
-        # Flush the bootstrapped data to disk immediately
         self.store.flush()
+        print("[Data Service] Bootstrap complete.")
 
     async def run(self):
         print("[Data Service] Starting Standalone Data Service (Live Ticks + OHLCV Storage)...")
