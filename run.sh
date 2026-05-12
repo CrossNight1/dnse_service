@@ -26,8 +26,8 @@ if [ "$1" == "--node" ]; then
 else
     echo "Running Python WebSocket client..."
     # Check if virtualenv exists
-    if [ -d "venv" ]; then
-        source venv/bin/bin/activate
+    if [ -d ".venv" ]; then
+        source .venv/bin/activate
     fi
     
     if [ "$1" == "--background" ]; then
