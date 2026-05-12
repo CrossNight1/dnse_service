@@ -13,7 +13,8 @@ from dnse_ws.common import build_signature, get_date_header_name
 import urllib3
 
 # Configuration
-SYMBOLS = ["VN301!", "VNINDEX", "VN30"]
+SYMBOLS = ["VN30F1M", "VNINDEX", "VN30"]
+SYMBOL_MAP = {"VN30F1M": "VN301!"} # Map DNSE ticker to Dashboard ticker
 API_KEY = os.getenv("DNSE_API_KEY", "eyJvcmciOiJkbnNlIiwiaWQiOiJiNDcxYTBhNjE4MTI0ZWNjYTI0YjI2YzcyMGExNzdkZiIsImgiOiJtdXJtdXIxMjgifQ==")
 API_SECRET = os.getenv("DNSE_API_SECRET", "510ksymQU949Se_NphYe3_LXT1O8zclFx1lam3MPRuIMOQhdOvokSQPE7YmhHEUTS4pCq9ZqaWnpbaui34AJVw")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
@@ -154,8 +155,9 @@ class DataService:
         
         for symbol in SYMBOLS:
             try:
+                display_symbol = SYMBOL_MAP.get(symbol, symbol)
                 url = f"https://openapi.dnse.com.vn/v1/market/ohlc?symbol={symbol}&resolution=1&from={today_start}&to={now}"
-                print(f"[Data Service] Fetching history for {symbol}...")
+                print(f"[Data Service] Fetching history for {symbol} (Dashboard: {display_symbol})...")
                 
                 # Run sync request in a thread to avoid blocking the event loop
                 resp = await asyncio.to_thread(
@@ -204,11 +206,11 @@ class DataService:
                             
                             # 2. Update Redis with the list of candles (Dashboard expectation)
                             # Prefix MUST be 'candles:' as per vps_dashboard Go server
-                            await r.set(f"candles:{symbol}:1m", json.dumps(all_bars))
+                            await r.set(f"candles:{display_symbol}:1m", json.dumps(all_bars))
                             
                             # Also update higher timeframes with the same list for now so they aren't empty/stale
                             for tf in ["5m", "15m", "1h", "4h", "1D"]:
-                                await r.set(f"candles:{symbol}:{tf}", json.dumps(all_bars))
+                                await r.set(f"candles:{display_symbol}:{tf}", json.dumps(all_bars))
                                 
                         else:
                             print(f"[Data Service] No historical data found for {symbol} today.")

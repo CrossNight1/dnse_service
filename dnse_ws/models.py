@@ -338,17 +338,24 @@ class Ohlc:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Ohlc":
+        # Handle volume which might be string or int in DNSE API
+        raw_volume = data.get("volume") or data.get("Volume") or 0
+        try:
+            volume = int(float(raw_volume))
+        except (ValueError, TypeError):
+            volume = 0
+            
         return cls(
             symbol=data.get("symbol") or data.get("Symbol"),
-            resolution=data.get("resolution") or data.get("Resolution"),
-            open=data.get("open") or data.get("Open"),
-            high=data.get("high") or data.get("High"),
-            low=data.get("low") or data.get("Low"),
-            close=data.get("close") or data.get("Close"),
-            volume=data.get("volume") or data.get("Volume"),
-            time=data.get("time") or data.get("Time"),
-            type=data.get("type") or data.get("Type"),
-            lastUpdated=data.get("lastUpdated") or data.get("LastUpdated")
+            resolution=int(data.get("resolution") or data.get("Resolution") or 1),
+            open=Decimal(str(data.get("open") or data.get("Open") or 0)),
+            high=Decimal(str(data.get("high") or data.get("High") or 0)),
+            low=Decimal(str(data.get("low") or data.get("Low") or 0)),
+            close=Decimal(str(data.get("close") or data.get("Close") or 0)),
+            volume=volume,
+            time=int(data.get("time") or data.get("Time") or 0),
+            type=data.get("type") or data.get("Type", ""),
+            lastUpdated=int(data.get("lastUpdated") or data.get("LastUpdated") or 0)
         )
 
 

@@ -7,7 +7,8 @@ from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
 # Configuration (Mirrors main.py)
-SYMBOLS = ["VN301!", "VNINDEX", "VN30"]
+SYMBOLS = ["VN30F1M", "VNINDEX", "VN30"]
+SYMBOL_MAP = {"VN30F1M": "VN301!"} # Map DNSE ticker to Dashboard ticker
 API_KEY = os.getenv("DNSE_API_KEY", "eyJvcmciOiJkbnNlIiwiaWQiOiJiNDcxYTBhNjE4MTI0ZWNjYTI0YjI2YzcyMGExNzdkZiIsImgiOiJtdXJtdXIxMjgifQ==")
 DATA_DIR = Path("data")
 
@@ -25,6 +26,7 @@ def sync_data():
 
     for symbol in SYMBOLS:
         try:
+            display_symbol = SYMBOL_MAP.get(symbol, symbol)
             url = f"https://openapi.dnse.com.vn/v1/market/ohlc?symbol={symbol}&resolution=1&from={start_time}&to={now}"
             resp = http.request("GET", url, headers={"Authorization": f"Bearer {API_KEY}"})
             
@@ -75,10 +77,10 @@ def sync_data():
                             
                             import redis
                             r_sync = redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379"), decode_responses=True)
-                            r_sync.set(f"candles:{symbol}:1m", json.dumps(redis_list))
+                            r_sync.set(f"candles:{display_symbol}:1m", json.dumps(redis_list))
                             # Sync higher timeframes for simplicity
                             for tf in ["5m", "15m", "1h", "4h", "1D"]:
-                                r_sync.set(f"candles:{symbol}:{tf}", json.dumps(redis_list))
+                                r_sync.set(f"candles:{display_symbol}:{tf}", json.dumps(redis_list))
 
             else:
                 print(f"  - Error syncing {symbol}: HTTP {resp.status}")
