@@ -103,8 +103,40 @@ class DataService:
         await r.set(f"quote:{quote.symbol}", json.dumps(data))
 
     async def on_ohlc(self, ohlc: Ohlc):
-        """Handle live OHLC bars - Store in Parquet"""
+        """Handle live OHLC bars - Store in Parquet & Update Redis List"""
+        # 1. Store for backtesting
         self.store.add_ohlcv(ohlc)
+        
+        # 2. Update Redis candles list (Dashboard expectation)
+        try:
+            key = f"candles:{ohlc.symbol}:1m"
+            raw = await r.get(key)
+            candles = json.loads(raw) if raw else []
+            
+            # Append new candle
+            new_candle = {
+                "time": ohlc.time,
+                "open": float(ohlc.open),
+                "high": float(ohlc.high),
+                "low": float(ohlc.low),
+                "close": float(ohlc.close),
+                "volume": int(ohlc.volume)
+            }
+            candles.append(new_candle)
+            
+            # Keep only last 1000 bars in Redis to prevent memory bloat
+            if len(candles) > 1000:
+                candles = candles[-1000:]
+                
+            await r.set(key, json.dumps(candles))
+            
+            # Also update higher timeframes for simple visualization (Optional)
+            # For now, we'll just keep them updated so they aren't totally stale.
+            for tf in ["5m", "15m", "1h", "4h", "1D"]:
+                await r.set(f"candles:{ohlc.symbol}:{tf}", json.dumps(candles))
+                
+        except Exception as e:
+            print(f"[Data Service] Error updating Redis candles: {e}")
 
     def stop(self):
         print("\n[Data Service] Shutdown signal received...")
@@ -143,7 +175,8 @@ class DataService:
                         
                         count = len(timestamps)
                         if count > 0:
-                            print(f"[Data Service] Fetched {count} historical bars for {symbol}")
+                            print(f"[Data Service] Fetched {count} historical bars for {symbol}")                            # 1. Update Parquet Store
+                            all_bars = []
                             for i in range(count):
                                 ohlc = Ohlc(
                                     symbol=symbol,
@@ -158,19 +191,25 @@ class DataService:
                                     type="ohlc"
                                 )
                                 self.store.add_ohlcv(ohlc)
+                                
+                                # Prepare for Redis
+                                all_bars.append({
+                                    "time": timestamps[i],
+                                    "open": float(opens[i]),
+                                    "high": float(highs[i]),
+                                    "low": float(lows[i]),
+                                    "close": float(closes[i]),
+                                    "volume": int(volumes[i])
+                                })
                             
-                            # Update Redis with the latest candle
-                            last_idx = count - 1
-                            redis_data = {
-                                "symbol": symbol,
-                                "open": float(opens[last_idx]),
-                                "high": float(highs[last_idx]),
-                                "low": float(lows[last_idx]),
-                                "close": float(closes[last_idx]),
-                                "volume": int(volumes[last_idx]),
-                                "timestamp": timestamps[last_idx] * 1000
-                            }
-                            await r.set(f"ohlc:{symbol}:1m", json.dumps(redis_data))
+                            # 2. Update Redis with the list of candles (Dashboard expectation)
+                            # Prefix MUST be 'candles:' as per vps_dashboard Go server
+                            await r.set(f"candles:{symbol}:1m", json.dumps(all_bars))
+                            
+                            # Also update higher timeframes with the same list for now so they aren't empty/stale
+                            for tf in ["5m", "15m", "1h", "4h", "1D"]:
+                                await r.set(f"candles:{symbol}:{tf}", json.dumps(all_bars))
+                                
                         else:
                             print(f"[Data Service] No historical data found for {symbol} today.")
                 else:
@@ -192,18 +231,18 @@ class DataService:
         self.ws_client.on("quote", self.on_quote)
         self.ws_client.on("ohlc", self.on_ohlc)
         
-        # 2. Start flush loop
+        # 3. Start flush loop
         flush_task = asyncio.create_task(self.store.flush_loop())
         
-        # 3. Connect
+        # 4. Connect
         try:
             await self.ws_client.connect()
             print(f"[Data Service] Subscribing to trades, quotes & 1m OHLC for: {SYMBOLS}")
             await self.ws_client.subscribe_trades(SYMBOLS)
             await self.ws_client.subscribe_quotes(SYMBOLS)
-            await self.ws_client.subscribe_ohlc(SYMBOLS, "1") # Passed as string, not list
+            await self.ws_client.subscribe_ohlc(SYMBOLS, "1")
             
-            # Wait for stop event instead of while True
+            # Wait for stop event
             await self._stop_event.wait()
             
         except Exception as e:
@@ -211,7 +250,7 @@ class DataService:
         finally:
             print("[Data Service] Cleaning up...")
             flush_task.cancel()
-            self.store.flush() # Final flush before exit
+            self.store.flush()
             await self.ws_client.disconnect()
             print("[Data Service] Disconnected. Goodbye.")
 

@@ -57,6 +57,29 @@ def sync_data():
                         
                         final_df.to_parquet(file_path, compression="snappy")
                         print(f"  - Synchronized {len(group)} bars for {symbol} on {date_str}")
+
+                        # Update Redis for Dashboard (ONLY for 1m for now)
+                        if date_str == datetime.now().strftime('%Y-%m-%d'):
+                            # Load the whole day's data from Parquet to ensure full list
+                            df_day = pd.read_parquet(file_path)
+                            redis_list = []
+                            for _, row in df_day.iterrows():
+                                redis_list.append({
+                                    "time": int(row['timestamp'].timestamp()),
+                                    "open": float(row['open']),
+                                    "high": float(row['high']),
+                                    "low": float(row['low']),
+                                    "close": float(row['close']),
+                                    "volume": int(row['volume'])
+                                })
+                            
+                            import redis
+                            r_sync = redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379"), decode_responses=True)
+                            r_sync.set(f"candles:{symbol}:1m", json.dumps(redis_list))
+                            # Sync higher timeframes for simplicity
+                            for tf in ["5m", "15m", "1h", "4h", "1D"]:
+                                r_sync.set(f"candles:{symbol}:{tf}", json.dumps(redis_list))
+
             else:
                 print(f"  - Error syncing {symbol}: HTTP {resp.status}")
         except Exception as e:
