@@ -1,20 +1,30 @@
-'use strict';
+const fs = require('fs');
+const path = require('path');
 
-const Redis = require('ioredis');
-const { DNSEClient } = require('./dnse-datafeed-sdk/javascript/dnse');
+// Load Configuration
+const configPath = path.join(__dirname, 'config.json');
+let CONFIG;
+if (fs.existsSync(configPath)) {
+    CONFIG = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+} else {
+    CONFIG = {
+        SYMBOLS: ["VN30F1M", "VNINDEX", "VN30"],
+        API: { BASE_URL: "https://openapi.dnse.com.vn" },
+        REDIS: { URL: "redis://localhost:6379", CANDLE_LIMIT: 1000 }
+    };
+}
 
 const API_KEY = process.env.DNSE_API_KEY || 'eyJvcmciOiJkbnNlIiwiaWQiOiJiNDcxYTBhNjE4MTI0ZWNjYTI0YjI2YzcyMGExNzdkZiIsImgiOiJtdXJtdXIxMjgifQ==';
 const API_SECRET = process.env.DNSE_API_SECRET || '510ksymQU949Se_NphYe3_LXT1O8zclFx1lam3MPRuIMOQhdOvokSQPE7YmhHEUTS4pCq9ZqaWnpbaui34AJVw';
-const REDIS_ADDR = process.env.REDIS_ADDR || 'localhost:6379';
 
-const redis = new Redis(REDIS_ADDR);
+const redis = new Redis(process.env.REDIS_URL || CONFIG.REDIS.URL);
 const client = new DNSEClient({
     apiKey: API_KEY,
     apiSecret: API_SECRET,
-    baseUrl: 'https://openapi.dnse.com.vn',
+    baseUrl: CONFIG.API.BASE_URL,
 });
 
-const SYMBOLS = ['VN301!', 'VNINDEX', 'VN30'];
+const SYMBOLS = CONFIG.SYMBOLS;
 
 // Intervals: base is 1m, aggregated from that
 const INTERVALS = ['1', '5', '15', '60', '240', 'D']; // DNSE resolution codes

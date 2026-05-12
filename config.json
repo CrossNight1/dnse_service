@@ -1,0 +1,22 @@
+{
+  "SYMBOLS": ["VN30F1M", "VNINDEX", "VN30"],
+  "SYMBOL_TYPES": {
+    "VN30F1M": "DERIVATIVE",
+    "VNINDEX": "INDEX",
+    "VN30": "INDEX"
+  },
+  "API": {
+    "BASE_URL": "https://openapi.dnse.com.vn",
+    "WS_URL": "wss://ws-openapi.dnse.com.vn/v1/stream?encoding=json"
+  },
+  "BOOTSTRAP": {
+    "ENABLE_FETCH_API": false,
+    "DELAY_SECONDS": 10,
+    "BACKOFF_SECONDS": 30,
+    "RETRIES": 3
+  },
+  "REDIS": {
+    "URL": "redis://localhost:6379",
+    "CANDLE_LIMIT": 1000
+  }
+}

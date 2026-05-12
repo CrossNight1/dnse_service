@@ -7,6 +7,9 @@ from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
 # Configuration (Mirrors main.py)
+SCRIPT_DIR = Path(__file__).parent.absolute()
+DATA_DIR = SCRIPT_DIR / "data"
+
 SYMBOLS = ["VN30F1M", "VNINDEX", "VN30"]
 TYPE_MAP = {
     "VN30F1M": "DERIVATIVE",
@@ -14,7 +17,6 @@ TYPE_MAP = {
     "VN30": "INDEX"
 }
 API_KEY = os.getenv("DNSE_API_KEY", "eyJvcmciOiJkbnNlIiwiaWQiOiJiNDcxYTBhNjE4MTI0ZWNjYTI0YjI2YzcyMGExNzdkZiIsImgiOiJtdXJtdXIxMjgifQ==")
-DATA_DIR = Path("data")
 
 def sync_data():
     """Fetch recent data via REST API and append to Parquet files"""
