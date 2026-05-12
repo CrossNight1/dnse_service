@@ -110,10 +110,79 @@ class DataService:
         print("\n[Data Service] Shutdown signal received...")
         self._stop_event.set()
 
+    async def bootstrap(self):
+        """Fetch historical candles from REST API to fill gaps and update Redis"""
+        print("[Data Service] Bootstrapping historical data...")
+        
+        # Calculate timestamps for today (from midnight to now)
+        now = int(time.time())
+        today_start = int(datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+        
+        http = urllib3.PoolManager()
+        
+        for symbol in SYMBOLS:
+            try:
+                url = f"https://openapi.dnse.com.vn/v1/market/ohlc?symbol={symbol}&resolution=1&from={today_start}&to={now}"
+                resp = http.request("GET", url, headers={"Authorization": f"Bearer {API_KEY}"})
+                
+                if resp.status == 200:
+                    data = json.loads(resp.data.decode('utf-8'))
+                    # Expected format: {"s": "ok", "t": [...], "o": [...], "h": [...], "l": [...], "c": [...], "v": [...]}
+                    if data.get("s") == "ok" and "t" in data:
+                        timestamps = data["t"]
+                        opens = data["o"]
+                        highs = data["h"]
+                        lows = data["l"]
+                        closes = data["c"]
+                        volumes = data["v"]
+                        
+                        count = len(timestamps)
+                        if count > 0:
+                            print(f"[Data Service] Fetched {count} historical bars for {symbol}")
+                            
+                            # 1. Update Parquet Store
+                            for i in range(count):
+                                ohlc = Ohlc(
+                                    symbol=symbol,
+                                    resolution=1,
+                                    open=opens[i],
+                                    high=highs[i],
+                                    low=lows[i],
+                                    close=closes[i],
+                                    volume=volumes[i],
+                                    time=timestamps[i],
+                                    lastUpdated=timestamps[i],
+                                    type="ohlc"
+                                )
+                                self.store.add_ohlcv(ohlc)
+                            
+                            # 2. Update Redis with the latest candle
+                            last_idx = count - 1
+                            redis_data = {
+                                "symbol": symbol,
+                                "open": float(opens[last_idx]),
+                                "high": float(highs[last_idx]),
+                                "low": float(lows[last_idx]),
+                                "close": float(closes[last_idx]),
+                                "volume": int(volumes[last_idx]),
+                                "timestamp": timestamps[last_idx] * 1000
+                            }
+                            await r.set(f"ohlc:{symbol}:1m", json.dumps(redis_data))
+                else:
+                    print(f"[Data Service] Failed to bootstrap {symbol}: HTTP {resp.status}")
+            except Exception as e:
+                print(f"[Data Service] Bootstrap error for {symbol}: {e}")
+        
+        # Flush the bootstrapped data to disk immediately
+        self.store.flush()
+
     async def run(self):
         print("[Data Service] Starting Standalone Data Service (Live Ticks + OHLCV Storage)...")
         
-        # 1. Register handlers
+        # 1. Bootstrap historical data
+        await self.bootstrap()
+        
+        # 2. Register handlers
         self.ws_client.on("trade", self.on_trade)
         self.ws_client.on("quote", self.on_quote)
         self.ws_client.on("ohlc", self.on_ohlc)
